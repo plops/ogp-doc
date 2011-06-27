@@ -24,12 +24,25 @@
   (upload-vm0 4)
   (upload-vm1 5))
 
+
+
 (define-alien-type u8 unsigned-char)
 (define-alien-type u32 unsigned-int)
 (define-alien-type card (* int))
 (define-alien-type upload int)
 (define-alien-type head int)
-(define-alien-type mode-info (* int))
+(define-alien-type mode-info-struct 
+    (struct mode-info-struct
+	    (pixel-clock u32)
+	    (hres u32) (hfp u32) (hsync u32) (hblank u32)
+	    (vres u32) (vfp u32) (vsync u32) (vblank u32)
+	    (digital u8)
+	    (hsync-is-low u8)
+	    (vsync-is-low u8)
+	    (pix-depth u8)
+	    (fb-start u32)
+	    (pitch u32)))
+(define-alien-type mode-info (* mode-info-struct))
 (define-alien-type size_t unsigned-long)
 
 (defun replace-_ (str)
