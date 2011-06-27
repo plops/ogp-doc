@@ -2,8 +2,7 @@
   (:use :cl :sb-alien :sb-c-call))
 (in-package :oga1-ffi)
 
-(defparameter *library* "/opt/ogp/lib/liboga1.so")
-(load-shared-object *library*)
+(load-shared-object "/opt/ogp/lib/liboga1.so")
 
 (defmacro defconstants (&rest rest)
   `(progn
@@ -45,18 +44,21 @@
 (define-alien-type mode-info (* mode-info-struct))
 (define-alien-type size_t unsigned-long)
 
-(defun replace-_ (str)
-  (dotimes (i (length str) str)
-    (when (eq (char str i) #\-)
-      (setf (char str i) #\_))))
+(eval-when (:compile-toplevel)
+  (defun replace-_ (str)
+   (dotimes (i (length str) str)
+     (when (eq (char str i) #\-)
+       (setf (char str i) #\_)))))
 
-(defmacro defc (name ret args)
-  `(define-alien-routine (,(string-downcase 
-			    (replace-_ (format nil "oga1_~a" name)))
-			  ,(intern (format nil "~a" name)))
-       ,ret
-     (card card)
-     ,@args))
+(defmacro defc (name ret args &key (card t))
+  (progn
+    (when card
+      (push '(card card) args))
+   `(define-alien-routine (,(string-downcase 
+			     (replace-_ (format nil "oga1_~a" name)))
+			    ,(intern (format nil "~a" name)))
+	,ret
+      ,@args)))
  
 
 
@@ -110,3 +112,17 @@
   ((info (* mode-info))
    (width u32) (height u32) (refresh u32)
    (ddc (* u8))))
+
+;; check how to setup the screen in oga1-hq-test
+;; obtain the numbers with the nvidia card
+;; use OG_TEST_COMMAND to fill a rectangle on the screen
+
+;; user
+
+(load-shared-object "/opt/ogp/lib/liboga1-user.so")
+
+(defc card-open card ((bus int) (dev int) (func int)) :card nil)
+(defc card-free void nil)
+(defc card-set-log-file void ((file-pointer (* int))))
+(defc edid-dump void ((file-pointer (* int))
+		      (ddc (* u8))))
