@@ -66,7 +66,10 @@ written."
   (dividers-base-clock-mask #x200)
   (dividers-base-clock-posn 9)
   (dividers-oe-mask #x400)
-  (dividers-oe-posn 10))
+  (dividers-oe-posn 10)
+  ;;
+  (vid-fb-offset-t #x8000000)
+  )
 
 (define-alien-type u8 unsigned-char)
 (define-alien-type u32 unsigned-int)
@@ -167,12 +170,7 @@ defined."
 (defc i2c-write2 int ((i2c i2c) (addr u8) (b0 u8) (b1 u8)))
 (defc i2c-get-edid int ((head head) (ddc (* u8))))
 
-;; check how to setup the screen in oga1-hq-test
-;; obtain the numbers with the nvidia card
-;; use OG_TEST_COMMAND to fill a rectangle on the screen
-
 ;; user
-
 (load-shared-object "/opt/ogp/lib/liboga1-user.so")
 
 (defc card-open card ((bus int) (dev int) (func int)) :card nil)
@@ -180,16 +178,6 @@ defined."
 (defc card-set-log-file void ((file-pointer (* int))))
 (defc edid-dump void ((file-pointer (* int))
 		      (ddc (* u8))))
-
-#+nil
-(defparameter *card* (card-open #x0b 1 0))
-#+nil
-(card-mem-init *card*)
-#+nil
-(let ((ddc (make-array 128 :element-type '(unsigned-byte 8))))
- (defparameter *top* (i2c-get-edid *card* +head-top+ (sb-sys:vector-sap ddc)))
- ;; 0 success, 1 timeout, 2 bad head, 3 bad header, 4 bad checksum
- (defparameter *ddc* ddc))
 
 (defun parse-ddc ()
  (macrolet ((q (i)
@@ -219,36 +207,6 @@ defined."
 	 :hsync-positive (ldb (byte 1 1) (q 71))
 	 :stereo (ldb (byte 1 0) (q 71)))))
 
-#+nil
-(parse-ddc)
-#+nil ;; this is the output: 
-(:PIXEL-CLOCK-HZ 108090000 :HACT 1280 :HBLANK 408 :VACT 1024 :VBLANK 42
-    :HSYNC-OFF 48 :HSYNC-WIDTH 112 :VSYNC-OFF 1 :VSYNC-WIDTH 3 :XSIZE-MM 320
-    :YSIZE-MM 240 :HBORDER 0 :VBORDER 0 :INTERLACED 0 :STEREO 0 :SEPARATE-SYNC
-    3 :VSYNC-POSITIVE 1 :HSYNC-POSITIVE 1 :STEREO 0)
-
-;; I'm mostly interested in the frequency of 108.09 MHz which will
-;; generate 60.07 Hz as shown below:
-#+nil
-(let ((htotal (+ 1280 408))
-      (vtotal (+ 1024 42)))
-  (list :htotal htotal
-	:vtotal vtotal 
-	:vrefresh (/ 108.09e6 (* htotal vtotal))))
-;; this returns: (:HTOTAL 1688 :VTOTAL 1066 :VREFRESH 60.069756)
-
-#+nil ;; turn DAC off
-(video-reset *card* 1)
-
-;; Now I want to learn how oga1 chooses the right clock frequency
-;; This is an example run of oga1-vid-test:
-; Requested clock = 216180000
-; Actual clock    = 214285680 (difference = 1894320)
-; Dividers        = sel:1 pre:35 post:1
-
-;; Apparently it just requested twice the pixel clock.
-
-
 (defun dividers-to-u32 (oe base-clock divisor0 divisor1)
   "Combine parameters into a value that can be written to the dividers
 register."
@@ -271,21 +229,12 @@ register."
 	:divisor0 (ldb (byte 6 +dividers-divisor0-lsb-posn+) v)
 	:divisor1 (ldb (byte 3 +dividers-divisor1-lsb-posn+) v)))
 
-#+nil
-(dividers-u32-to-list (dividers-to-u32 0 1 28 1))
-;; 806 -> (:OE 0 :BASE-CLOCK 0 :DIVISOR0 96 :DIVISOR1 6) 
-
-;; as far as I understand this is how the clock is determined,
-;; ref-clock is either 133 or 125 MHz 
 (defun get-divided-frequency (ref-clock pre post)
   (* 48 (/ ref-clock (ash pre 
 			  (1- post)))))
 
-#+nil
-(dividers-u32-to-list (oga1-dividers-to-u32 0 1 28 1))
-
 (defun lisp-get-clock-dividers (freq)
-  "Find the 4 best clock dividers to achieve frequency."
+  "Find the 4 best clock divider combinations to achieve frequency."
   (declare (type (unsigned-byte 32) freq))
   (let ((res nil))
     (let ((max-freq (+ freq (/ (* 5 freq) 1000))))
@@ -302,33 +251,6 @@ register."
 			    (push (list diff (* 1d0 (/ diff test-clk)) sel pre post) res))))))))))
     (subseq (sort res #'< :key #'first)
 	    0 4)))
-#+nil
-(first (lisp-get-clock-dividers (* 2 108090000)))
-
-;; the best choice is to use the second reference clock with 125 MHz
-;; and pre=28 post=2, this gives a relative frequency error of 0.8 %
-#+nil
-((6630000/7 0.00884d0 1 28 2) (1426000 0.013369084227105678d0 0 30 2)
- (134610000/29 0.04487d0 1 29 2)
- (150870000/31 0.047148053701342535d0 0 31 2))
-
-;; this is not the same result as oga1_get_clock_dividers returned.
-;; it wanted to use the first clock with pre 96 and post 6
-;; let's see what the actual frequency of this would be
-#+nil
-(/ (get-divided-frequency +s3-ref-clock1+ 28 1) (* 2 1688 1066d0))
-;; => 2.0832812499999998d0
-;; so this would be 2.08 MHz
-
-
-
-#+nil
-(defparameter *f* (get-clock-frequency *card* *div*))
-#+nil
-(set-video-clock *card* +head-top+ 1 108090000)
-;;                                   165000000
-#+nil
-(dvi-init *card* +head-top+ 108090000) ;; oga1/oga1-utils.c
 
 (define-alien-routine progressive int
   (program (* u32))
@@ -348,8 +270,6 @@ register."
   (horiz-assert-low u32)
   (vert-assert-low u32))
 
-(defc vm-upload void ((head head) (base u32) (vbase (* u32)) (size size_t)))
-
 (defun lisp-vm-upload (base program n)
   (declare (type (unsigned-byte 32) base n)
 	   (type (simple-array (unsigned-byte 32) (512)) program))
@@ -359,28 +279,11 @@ register."
      (card-rset *card* addr (aref program i))
      (incf addr 4))))
 
-
-#+nil
-(let* ((program (make-array 512 :element-type '(unsigned-byte 32)))
-       (sap (sb-sys:vector-sap program))
-       (n   (progressive sap
-			 1280 1024
-			 1280 1024
-			 4 
-			 48 112 248
-			 1 3 38
-			 #x80 2
-			 0 1)))
-  (lisp-vm-upload 0 program n))
-
-
 (defun lisp-set-video-clock ()
   (card-rset *card* +vc0-dividers+ (dividers-to-u32 0 1 28 1))
   (sleep .001)
   (card-rset *card* +vc0-dividers+ (dividers-to-u32 1 1 28 1))
   (sleep .001))
-#+nil
-(lisp-set-video-clock)
 
 (defun lisp-set-pixel-info (depth rate)
   (declare (type (unsigned-byte 3) depth)
@@ -407,31 +310,24 @@ register."
     (card-rset *card* +vc0-output-mode+ v)
     v))
 
-(defun lisp-set-video-mode ()
-  (lisp-set-output-mode 1 0 0 0 1 1)
-  (sleep .001)
+(defun lisp-unset-video-mode ()
   (card-rset *card* +vc0-cpu-reset-b+ 0)  ;; disable video program counter
   (card-rset *card* +vc0-video-enable+ 0) ;; disable video controller
   (card-rset *card* +vc0-pc-start+ 0)     ;; reset program counter
-  (card-rset *card* +vc0-interrupt-enable+ 0)
+  (card-rset *card* +vc0-interrupt-enable+ 0))
+
+(defun lisp-set-video-mode ()
+  (lisp-set-output-mode 1 0 0 0 1 0)
+  (sleep .001)
+  (lisp-unset-video-mode)
   (let ((dvi-sl 1)
 	(vid-mode 5))
     (lisp-set-pixel-info vid-mode dvi-sl))
   
   (lisp-set-output-mode 1 0 0 0 0 1)
   (card-rset *card* +vc0-cpu-reset-b+ 1)
-  (card-rset *card* +vc0-interrupt-enable+ 1)
-  (card-rset *card* +vc0-interrupt-enable+ 0)
-  (card-rset *card* +vc0-interrupt-enable+ 1)
-
-  (card-rset *card* +vc0-video-enable+ 1))
-
-#+nil
-(lisp-set-video-mode)
-
-#+nil
-(set-video-mode *card* +head-top+ 1 108090000 32)
-
+  (card-rset *card* +vc0-video-enable+ 1)
+  (card-rset *card* +vc0-interrupt-enable+ 1))
 
 (defun lisp-set-mode ()
   (lisp-set-video-clock)
@@ -446,9 +342,45 @@ register."
 			   48 112 248
 			   1 3 38
 			   #x80 2
-			   0 1)))
+			   0 0)))
     (lisp-vm-upload 0 program n)) 
   
   (lisp-set-video-mode))
 
+#+nil
+(defparameter *card* (card-open #x0b 1 0))
+#+nil
+(card-mem-init *card*)
+#+nil
+(let ((ddc (make-array 128 :element-type '(unsigned-byte 8))))
+ (defparameter *top* (i2c-get-edid *card* +head-top+ (sb-sys:vector-sap ddc)))
+ ;; 0 success, 1 timeout, 2 bad head, 3 bad header, 4 bad checksum
+ (defparameter *ddc* ddc)
+ (parse-ddc))
+
+#+nil ;; turn DAC off
+(video-reset *card* 1)
+
+#+nil
 (lisp-set-mode)
+
+#+nil
+(lisp-unset-video-mode)
+
+#+nil
+(card-mset *card* +vid-fb-offset-t+ #x00123456)
+#+nil
+(card-mget *card* +vid-fb-offset-t+)
+
+(defun draw-screen ()
+  (let ((pitch 1280))
+   (dotimes (i 1280)
+     (dotimes (j 1024)
+       (declare (type (unsigned-byte 16) j i pitch))
+       (let ((addr (+ +vid-fb-offset-t+
+		      (* 4 (+ (* pitch j)
+			      i)))))
+	 (card-mset *card* addr #xffffaaff))))))
+#+nil
+(time
+ (draw-screen))
