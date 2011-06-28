@@ -4,6 +4,9 @@
 
 (load-shared-object "/opt/ogp/lib/liboga1.so")
 
+(defparameter *ddc* 0)
+(defparameter *card* 0)
+
 (defmacro defconstants (&rest rest)
   `(progn
      ,@(loop for e in rest collect
@@ -27,9 +30,40 @@
   (ddc-bottom 1)
   (i2c-top 2)
   (i2c-bottom 3)
-  (vm0-program-memory #x3000))
+  ;; stuff from reg_defines
+  ;; block vm
+  (vm0-program-memory #x3000)
+  (vm1-program-memory #x4000)
+  ;; block vc
+  (vc0-pixel-x-start #x3800)
+  (vc0-pixel-y-start #x3804)
+  (vc0-clear-int #x3808)
+  (vc0-pixel-info #x380c) 
+  (vc0-cpu-reset-b #x3810)
+  (vc0-interrupt-enable #x3814)
+  (vc0-video-enable #x3818)
+  (vc0-pc-start #x3820)
+  (vc0-dividers #x3824)
+  (vc0-output-mode #x3828)
+  ;; dividers
+  (dividers-divisor1-mask 7)
+  (dividers-divisor1-lsb-posn 0)
+  (dividers-divisor1-msb-posn 2)
+  (dividers-divisor0-mask #x1f8)
+  (dividers-divisor0-lsb-posn 3)
+  (dividers-divisor0-msb-posn 8)
+  (dividers-base-clock-mask #x200)
+  (dividers-base-clock-posn 9)
+  (dividers-oe-mask #x400)
+  (dividers-oe-posn 10))
 
-
+(defun oga1-dividers-to-u32 (oe base-clock divisor0 divisor1)
+  (logior (if oe +dividers-oe-mask+ 0)
+	  (if base-clock +dividers-base-clock-mask+ 0)
+	  (logand (ash divisor0 +dividers-divisor0-lsb-posn+)
+		  +dividers-divisor0-mask+)
+	  (logand (ash divisor1 +dividers-divisor1-lsb-posn+)
+		  +dividers-divisor1-mask+)))
 
 (define-alien-type u8 unsigned-char)
 (define-alien-type u32 unsigned-int)
@@ -179,34 +213,18 @@
 
 #+nil
 (parse-ddc)
-#+nil
-(defparameter *inf* (make-alien (struct mode-info)))
 
-#+nil
-(defun run ()
- (sb-sys:with-pinned-objects (*ddc*)
-   (with-alien ((inf (struct mode-info)))
-     (defparameter *find-vid* (edid-find-video-mode 
-			       *card* (addr inf)
-			       0 0 0 (sb-sys:vector-sap *ddc*)))
-     (slot inf 'hsync-is-low))))
-#+nil
-
-
-
-(run)
 #+nil ;; turn DAC off
 (video-reset *card* 1)
+#+nil
+(defparameter *div* (get-clock-dividers *card* 108090000))
+#+nil
+(defparameter *f* (get-clock-frequency *card* *div*))
 #+nil
 (set-video-clock *card* +head-top+ 1 108090000)
 ;;                                   165000000
 #+nil
 (dvi-init *card* +head-top+ 108090000) ;; oga1/oga1-utils.c
-#+nil
-(load-video-program )
-#+nil
-(let ((program (make-array 512 :element-type '(unsigned-byte 32))))
-  (set-mode *card* +head-top+ (sb-sys:vector-sap program)))
 
 (define-alien-routine progressive int
   (program (* u32))
@@ -214,7 +232,7 @@
   (fb-height u32)
   (vp-width u32)
   (vp-height u32)
-  (depth u32)
+  (depth-bpp u32)
   (hfp u32)
   (hsync u32)
   (hbp u32)
@@ -245,11 +263,12 @@
        (n   (progressive sap
 			 1280 1024
 			 1280 1024
-			 32 
+			 4 
 			 48 112 248
 			 1 3 38
 			 #x80 2
-			 0 0)))
+			 0 1)))
   (lisp-vm-upload 0 program n))
 
-(set-video-mode *card* +head-top+ 1 108090000 32)
+#+nil
+(set-video-mode *card* +head-top+ 1 108090000 4)
