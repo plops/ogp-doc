@@ -33,6 +33,10 @@ written."
   (i2c-top 2)
   (i2c-bottom 3)
   ;; constants from reg_defines
+  ;; block xp10
+  (xp10-interrupt-status #x24)
+  (xp10-interrupt-clear #x24)
+  (xp10-interrupt-mask #x30)
   ;; block s3
   (s3-pll-min 180000000)
   (s3-pll-max 360000000)
@@ -63,17 +67,6 @@ written."
   (dividers-base-clock-posn 9)
   (dividers-oe-mask #x400)
   (dividers-oe-posn 10))
-
-(defun oga1-dividers-to-u32 (oe base-clock divisor0 divisor1)
-  "Combine parameters into a value that can be written to the dividers
-register."
-  (declare (values (unsigned-byte 32) &optional))
-  (logior (if oe +dividers-oe-mask+ 0)
-	  (if base-clock +dividers-base-clock-mask+ 0)
-	  (logand (ash divisor0 +dividers-divisor0-lsb-posn+)
-		  +dividers-divisor0-mask+)
-	  (logand (ash divisor1 +dividers-divisor1-lsb-posn+)
-		  +dividers-divisor1-mask+)))
 
 (define-alien-type u8 unsigned-char)
 (define-alien-type u32 unsigned-int)
@@ -256,26 +249,30 @@ defined."
 ;; Apparently it just requested twice the pixel clock.
 
 
-#+nil
-(defparameter *div* (get-clock-dividers *card* (* 2 108090000)))
-;; this returns 806, what does that mean?
+(defun dividers-to-u32 (oe base-clock divisor0 divisor1)
+  "Combine parameters into a value that can be written to the dividers
+register."
+  (declare (type (unsigned-byte 1) oe base-clock)
+	   (type (unsigned-byte 3) divisor1) 
+	   (type (unsigned-byte 6) divisor0) 
+	   (values (unsigned-byte 32) &optional))
+  (let ((res 0))
+    (setf (ldb (byte 1 +dividers-oe-posn+) res) oe
+	  (ldb (byte 1 +dividers-base-clock-posn+) res) base-clock
+	  (ldb (byte 3 +dividers-divisor1-lsb-posn+) res) divisor1
+	  (ldb (byte 6 +dividers-divisor0-lsb-posn+) res) divisor0)
+    res))
 
-(defun dividers-u32-to-list (val)
+(defun dividers-u32-to-list (v)
   "Parse the value from the dividers register into its components."
-  (list :oe (logand +dividers-oe-mask+ 
-		    (ash val (- +dividers-oe-posn+)))
-	:base-clock
-	(logand +dividers-base-clock-mask+ 
-		(ash val (- +dividers-base-clock-posn+)))
-	:divisor0
-	(logand +dividers-divisor0-mask+ 
-		(ash val (- +dividers-divisor0-lsb-posn+)))
-	:divisor1
-	(logand +dividers-divisor1-mask+ 
-		(ash val (- +dividers-divisor1-lsb-posn+)))))
+  (declare (type (unsigned-byte 32) v))
+  (list :oe (ldb (byte 1 +dividers-oe-posn+) v)
+	:base-clock (ldb (byte 1 +dividers-base-clock-posn+) v)
+	:divisor0 (ldb (byte 6 +dividers-divisor0-lsb-posn+) v)
+	:divisor1 (ldb (byte 3 +dividers-divisor1-lsb-posn+) v)))
 
 #+nil
-(dividers-u32-to-list *div*)
+(dividers-u32-to-list (dividers-to-u32 0 1 28 1))
 ;; 806 -> (:OE 0 :BASE-CLOCK 0 :DIVISOR0 96 :DIVISOR1 6) 
 
 ;; as far as I understand this is how the clock is determined,
@@ -284,16 +281,8 @@ defined."
   (* 48 (/ ref-clock (ash pre 
 			  (1- post)))))
 
-;; the oga1-vid-test chose these parameters
 #+nil
-(* 1d-6
- (get-divided-frequency +s3-ref-clock1+ 35 1))
-
-;; which gives 171.4 MHz. If divided by the total pixels this results
-;; in 47.6 Hz frame rate:
-#+nil
-(/ 171.4e6 (* 2 1688 1066))
-
+(dividers-u32-to-list (oga1-dividers-to-u32 0 1 28 1))
 
 (defun lisp-get-clock-dividers (freq)
   "Find the 4 best clock dividers to achieve frequency."
@@ -314,7 +303,7 @@ defined."
     (subseq (sort res #'< :key #'first)
 	    0 4)))
 #+nil
-(lisp-get-clock-dividers 108090000)
+(first (lisp-get-clock-dividers (* 2 108090000)))
 
 ;; the best choice is to use the second reference clock with 125 MHz
 ;; and pre=28 post=2, this gives a relative frequency error of 0.8 %
@@ -327,11 +316,9 @@ defined."
 ;; it wanted to use the first clock with pre 96 and post 6
 ;; let's see what the actual frequency of this would be
 #+nil
-(* 1d-6 (get-divided-frequency +s3-ref-clock0+ 96 6))
+(/ (get-divided-frequency +s3-ref-clock1+ 28 1) (* 2 1688 1066d0))
 ;; => 2.0832812499999998d0
 ;; so this would be 2.08 MHz
-
-(lisp-get-clock-dividers 216180000)
 
 
 
@@ -361,7 +348,6 @@ defined."
   (horiz-assert-low u32)
   (vert-assert-low u32))
 
-#+nil
 (defc vm-upload void ((head head) (base u32) (vbase (* u32)) (size size_t)))
 
 (defun lisp-vm-upload (base program n)
@@ -387,5 +373,82 @@ defined."
 			 0 1)))
   (lisp-vm-upload 0 program n))
 
+
+(defun lisp-set-video-clock ()
+  (card-rset *card* +vc0-dividers+ (dividers-to-u32 0 1 28 1))
+  (sleep .001)
+  (card-rset *card* +vc0-dividers+ (dividers-to-u32 1 1 28 1))
+  (sleep .001))
 #+nil
-(set-video-mode *card* +head-top+ 1 108090000 4)
+(lisp-set-video-clock)
+
+(defun lisp-set-pixel-info (depth rate)
+  (declare (type (unsigned-byte 3) depth)
+	   (type (unsigned-byte 1) rate))
+  (let ((v 0))
+    (declare (type (unsigned-byte 32) v))
+    (setf (ldb (byte 1 3) v) rate
+	  (ldb (byte 3 0) v) depth)
+    (card-rset *card* +vc0-pixel-info+ v)
+    v))
+
+(defun lisp-set-output-mode (digital not-dvi-sl dac-de-en dac-sync-en
+			     vsync-polarity hsync-polarity)
+  (declare (type (unsigned-byte 1) digital not-dvi-sl dac-de-en dac-sync-en
+		 vsync-polarity hsync-polarity))
+  (let ((v 0))
+    (declare (type (unsigned-byte 32) v))
+    (setf (ldb (byte 1 0) v) digital
+	  (ldb (byte 1 1) v) not-dvi-sl
+	  (ldb (byte 1 2) v) dac-de-en
+	  (ldb (byte 1 3) v) dac-sync-en
+	  (ldb (byte 1 4) v) vsync-polarity
+	  (ldb (byte 1 5) v) hsync-polarity)
+    (card-rset *card* +vc0-output-mode+ v)
+    v))
+
+(defun lisp-set-video-mode ()
+  (lisp-set-output-mode 1 0 0 0 1 1)
+  (sleep .001)
+  (card-rset *card* +vc0-cpu-reset-b+ 0)  ;; disable video program counter
+  (card-rset *card* +vc0-video-enable+ 0) ;; disable video controller
+  (card-rset *card* +vc0-pc-start+ 0)     ;; reset program counter
+  (card-rset *card* +vc0-interrupt-enable+ 0)
+  (let ((dvi-sl 1)
+	(vid-mode 5))
+    (lisp-set-pixel-info vid-mode dvi-sl))
+  
+  (lisp-set-output-mode 1 0 0 0 0 1)
+  (card-rset *card* +vc0-cpu-reset-b+ 1)
+  (card-rset *card* +vc0-interrupt-enable+ 1)
+  (card-rset *card* +vc0-interrupt-enable+ 0)
+  (card-rset *card* +vc0-interrupt-enable+ 1)
+
+  (card-rset *card* +vc0-video-enable+ 1))
+
+#+nil
+(lisp-set-video-mode)
+
+#+nil
+(set-video-mode *card* +head-top+ 1 108090000 32)
+
+
+(defun lisp-set-mode ()
+  (lisp-set-video-clock)
+  (dvi-init *card* +head-top+ 108090000)
+
+  (let* ((program (make-array 512 :element-type '(unsigned-byte 32)))
+	 (sap (sb-sys:vector-sap program))
+	 (n   (progressive sap
+			   1280 1024
+			   1280 1024
+			   4 
+			   48 112 248
+			   1 3 38
+			   #x80 2
+			   0 1)))
+    (lisp-vm-upload 0 program n)) 
+  
+  (lisp-set-video-mode))
+
+(lisp-set-mode)
