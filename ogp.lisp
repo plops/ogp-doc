@@ -8,6 +8,8 @@
 (defparameter *card* 0)
 
 (defmacro defconstants (&rest rest)
+  "Define multiple constants. Reduces the amount that needs to be
+written."
   `(progn
      ,@(loop for e in rest collect
 	    (destructuring-bind (name val) e
@@ -30,7 +32,12 @@
   (ddc-bottom 1)
   (i2c-top 2)
   (i2c-bottom 3)
-  ;; stuff from reg_defines
+  ;; constants from reg_defines
+  ;; block s3
+  (s3-pll-min 180000000)
+  (s3-pll-max 360000000)
+  (s3-ref-clock0 133330000)
+  (s3-ref-clock1 125000000)
   ;; block vm
   (vm0-program-memory #x3000)
   (vm1-program-memory #x4000)
@@ -58,6 +65,9 @@
   (dividers-oe-posn 10))
 
 (defun oga1-dividers-to-u32 (oe base-clock divisor0 divisor1)
+  "Combine parameters into a value that can be written to the dividers
+register."
+  (declare (values (unsigned-byte 32) &optional))
   (logior (if oe +dividers-oe-mask+ 0)
 	  (if base-clock +dividers-base-clock-mask+ 0)
 	  (logand (ash divisor0 +dividers-divisor0-lsb-posn+)
@@ -87,11 +97,16 @@
 
 (eval-when (:compile-toplevel)
   (defun replace-_ (str)
-   (dotimes (i (length str) str)
+    "Replaces hyphens with underscores. To convert Lisp names into C
+names."
+    (dotimes (i (length str) str)
      (when (eq (char str i) #\-)
        (setf (char str i) #\_)))))
 
 (defmacro defc (name ret args &key (card t))
+  "Define a foreign function of the liboga1* libraries. Most of them
+get card as first parameter. If CARD is nil no such parameter is
+defined."
   (progn
     (when card
       (push '(card card) args))
@@ -213,11 +228,113 @@
 
 #+nil
 (parse-ddc)
+#+nil ;; this is the output: 
+(:PIXEL-CLOCK-HZ 108090000 :HACT 1280 :HBLANK 408 :VACT 1024 :VBLANK 42
+    :HSYNC-OFF 48 :HSYNC-WIDTH 112 :VSYNC-OFF 1 :VSYNC-WIDTH 3 :XSIZE-MM 320
+    :YSIZE-MM 240 :HBORDER 0 :VBORDER 0 :INTERLACED 0 :STEREO 0 :SEPARATE-SYNC
+    3 :VSYNC-POSITIVE 1 :HSYNC-POSITIVE 1 :STEREO 0)
+
+;; I'm mostly interested in the frequency of 108.09 MHz which will
+;; generate 60.07 Hz as shown below:
+#+nil
+(let ((htotal (+ 1280 408))
+      (vtotal (+ 1024 42)))
+  (list :htotal htotal
+	:vtotal vtotal 
+	:vrefresh (/ 108.09e6 (* htotal vtotal))))
+;; this returns: (:HTOTAL 1688 :VTOTAL 1066 :VREFRESH 60.069756)
 
 #+nil ;; turn DAC off
 (video-reset *card* 1)
+
+;; Now I want to learn how oga1 chooses the right clock frequency
+;; This is an example run of oga1-vid-test:
+; Requested clock = 216180000
+; Actual clock    = 214285680 (difference = 1894320)
+; Dividers        = sel:1 pre:35 post:1
+
+;; Apparently it just requested twice the pixel clock.
+
+
 #+nil
-(defparameter *div* (get-clock-dividers *card* 108090000))
+(defparameter *div* (get-clock-dividers *card* (* 2 108090000)))
+;; this returns 806, what does that mean?
+
+(defun dividers-u32-to-list (val)
+  "Parse the value from the dividers register into its components."
+  (list :oe (logand +dividers-oe-mask+ 
+		    (ash val (- +dividers-oe-posn+)))
+	:base-clock
+	(logand +dividers-base-clock-mask+ 
+		(ash val (- +dividers-base-clock-posn+)))
+	:divisor0
+	(logand +dividers-divisor0-mask+ 
+		(ash val (- +dividers-divisor0-lsb-posn+)))
+	:divisor1
+	(logand +dividers-divisor1-mask+ 
+		(ash val (- +dividers-divisor1-lsb-posn+)))))
+
+#+nil
+(dividers-u32-to-list *div*)
+;; 806 -> (:OE 0 :BASE-CLOCK 0 :DIVISOR0 96 :DIVISOR1 6) 
+
+;; as far as I understand this is how the clock is determined,
+;; ref-clock is either 133 or 125 MHz 
+(defun get-divided-frequency (ref-clock pre post)
+  (* 48 (/ ref-clock (ash pre 
+			  (1- post)))))
+
+;; the oga1-vid-test chose these parameters
+#+nil
+(* 1d-6
+ (get-divided-frequency +s3-ref-clock1+ 35 1))
+
+;; which gives 171.4 MHz. If divided by the total pixels this results
+;; in 47.6 Hz frame rate:
+#+nil
+(/ 171.4e6 (* 2 1688 1066))
+
+
+(defun lisp-get-clock-dividers (freq)
+  "Find the 4 best clock dividers to achieve frequency."
+  (declare (type (unsigned-byte 32) freq))
+  (let ((res nil))
+    (let ((max-freq (+ freq (/ (* 5 freq) 1000))))
+      (dotimes (sel 2)
+	(let ((clk (elt (list +s3-ref-clock0+
+			      +s3-ref-clock1+)
+			sel)))
+	  (loop for pre from 1 upto 63 do
+	       (when (< +s3-pll-min+ (* 48 (/ clk pre)) +s3-pll-max+)
+		 (loop for post from 1 upto 6 do
+		      (let ((test-clk (get-divided-frequency clk pre post)))
+			(when (<= test-clk max-freq)
+			  (let ((diff (abs (- freq test-clk))))
+			    (push (list diff (* 1d0 (/ diff test-clk)) sel pre post) res))))))))))
+    (subseq (sort res #'< :key #'first)
+	    0 4)))
+#+nil
+(lisp-get-clock-dividers 108090000)
+
+;; the best choice is to use the second reference clock with 125 MHz
+;; and pre=28 post=2, this gives a relative frequency error of 0.8 %
+#+nil
+((6630000/7 0.00884d0 1 28 2) (1426000 0.013369084227105678d0 0 30 2)
+ (134610000/29 0.04487d0 1 29 2)
+ (150870000/31 0.047148053701342535d0 0 31 2))
+
+;; this is not the same result as oga1_get_clock_dividers returned.
+;; it wanted to use the first clock with pre 96 and post 6
+;; let's see what the actual frequency of this would be
+#+nil
+(* 1d-6 (get-divided-frequency +s3-ref-clock0+ 96 6))
+;; => 2.0832812499999998d0
+;; so this would be 2.08 MHz
+
+(lisp-get-clock-dividers 216180000)
+
+
+
 #+nil
 (defparameter *f* (get-clock-frequency *card* *div*))
 #+nil
