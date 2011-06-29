@@ -419,13 +419,35 @@ register."
 (time
  (draw-screen))
 
-(defun instruction (&key (de 0) (vsync 0) (hsync 0)
-		    (cursor 0) (ret 0) (int 0) (opcode 0)
+
+(defmacro def-choice (name choices)
+  `(defun ,name (&optional (param ,(first (first choices))))
+     (declare (type (member ,@(mapcar #'first choices)) param))
+     (ecase param ,@choices)))
+
+(def-choice cursor-to-nr ((:no-change #b0)
+		    (:advance-x #b01)
+		    (:reset-x-advance-y #b10)
+		    (:reset-xy #b11)))
+
+(def-choice opcode-to-nr ((:jump 0)
+		    (:call 1)
+		    (:wait 2)
+		    (:send 3)
+		    (:fetch 5)
+		    (:addr 6)
+		    (:inc 7)))
+
+(defun vc (opcode &key (de 0) (vsync 0) (hsync 0)
+		    (cursor :no-change) (ret 0) (int 0) 
 		    (count 0 count-p) (iaddr 0 iaddr-p) 
 		    (memory-address 0 memory-address-p))
+  "Construct an instruction for the video controller."
   (declare (type (unsigned-byte 1) de vsync hsync ret int)
-	   (type (unsigned-byte 2) cursor)
-	   (type (unsigned-byte 3) opcode)
+	   (TYPE (MEMBER :NO-CHANGE :ADVANCE-X
+			 :RESET-X-ADVANCE-Y :RESET-XY) cursor)
+	   (TYPE (MEMBER :JUMP :CALL :WAIT :SEND 
+			 :FETCH :ADDR :INC) opcode)
 	   (type (unsigned-byte 12) count)
 	   (type (unsigned-byte 9) iaddr)
 	   (type (unsigned-byte 21) memory-address)
@@ -435,16 +457,20 @@ register."
   (when (and iaddr-p memory-address-p)
     (break "iaddr and memory-address given at the same time."))
   
-  (let ((v 0))
-    (when (<= 1 opcode 3) ;; invert count when call wait or send
-	(setf count (- 2049 count)))
+  (let ((v 0)
+	(opcode-nr (opcode-to-nr opcode))
+	(cursor-nr (cursor-to-nr cursor)))
+    (declare (type (unsigned-byte 3) opcode-nr)
+	     (type (unsigned-byte 2) cursor-nr))
+    (when (member opcode '(:call :wait :send))
+      (setf count (- 2049 count)))
     (setf (ldb (byte 1 31) v) de
 	  (ldb (byte 1 30) v) vsync 
 	  (ldb (byte 1 29) v) hsync
-	  (ldb (byte 2 27) v) cursor 
+	  (ldb (byte 2 27) v) cursor-nr
 	  (ldb (byte 1 26) v) ret
 	  (ldb (byte 1 25) v) int
-	  (ldb (byte 3 21) v) opcode)
+	  (ldb (byte 3 21) v) opcode-nr)
     (when (or count-p iaddr-p)
       (setf (ldb (byte 12 9) v) count
 	    (ldb (byte 9 0) v) iaddr))
@@ -452,30 +478,12 @@ register."
       (setf (ldb (byte 21 0) v) memory-address))
     v))
 
-(defmacro def-choice (name choices)
-  `(defun ,name (&optional (param ,(first (first choices))))
-     (declare (type (member ,@(mapcar #'first choices)) param))
-     (ecase param ,@choices)))
-
-(def-choice cursor ((:no-change #b0)
-		    (:advance-x #b01)
-		    (:reset-x-advance-y #b10)
-		    (:reset-xy #b11)))
-
-(def-choice opcode ((:jump 0)
-		    (:call 1)
-		    (:wait 2)
-		    (:send 3)
-		    (:fetch 5)
-		    (:addr 6)
-		    (:inc 7)))
-
 
 (let ((vfp 2)
       (vsync 7)
       (vbp 3))
  (list
-  (instruction :opcode (opcode :call) :count vfp :iaddr 22 :hsync 1)
-  (instruction :opcode (opcode :call) :count vsync :iaddr 26 :hsync 1 :vsync 1)
-  (instruction :opcode (opcode :call) :count (1- vbp) :iaddr 22 :hsync 1 :vsync 1)
-  (instruction :opcode (opcode :addr))))
+  (vc :call :count vfp :iaddr 22 :hsync 1)
+  (vc :call :count vsync :iaddr 26 :hsync 1 :vsync 1)
+  (vc :call :count (1- vbp) :iaddr 22 :hsync 1 :vsync 1)
+  (vc :addr)))
