@@ -34,9 +34,12 @@ written."
   (i2c-bottom 3)
   ;; constants from reg_defines
   ;; block xp10
+  (xp10-video-reset #x20)
   (xp10-interrupt-status #x24)
   (xp10-interrupt-clear #x24)
-  (xp10-interrupt-mask #x30)
+  (xp10-dac-power-on #x28)
+  (xp10-interrupt-mask #x30) ;; rw
+  (xp10-test-reg #x7c) ;; rw
   ;; block s3
   (s3-pll-min 180000000)
   (s3-pll-max 360000000)
@@ -327,7 +330,28 @@ register."
   (lisp-set-output-mode 1 0 0 0 0 1)
   (card-rset *card* +vc0-cpu-reset-b+ 1)
   (card-rset *card* +vc0-video-enable+ 1)
+  (card-rset *card* +vc0-clear-int+ 1)
+  (card-rset *card* +xp10-interrupt-mask+ #b111)
+  (sleep .001)
   (card-rset *card* +vc0-interrupt-enable+ 1))
+
+#+nil
+(card-rset *card* +xp10-interrupt-mask+ #b111)
+#+nil
+(card-rget *card* +xp10-interrupt-mask+)
+#+nil
+(card-rset *card* +vc0-interrupt-enable+ 1)
+#+nil
+(card-rset *card* +vc0-video-enable+ 1)
+#+nil
+(card-rset *card* +vc0-clear-int+ 1)
+#+nil
+(card-rget *card* +xp10-interrupt-status+)
+#+nil
+(progn
+ (card-rset *card* +xp10-interrupt-clear+ 0)
+ (card-rget *card* +xp10-interrupt-status+))
+
 
 (defun lisp-set-mode ()
   (lisp-set-video-clock)
@@ -358,14 +382,24 @@ register."
  (defparameter *ddc* ddc)
  (parse-ddc))
 
+(defun lisp-video-reset ()
+  (card-rset *card* +xp10-video-reset+ 0)
+  (sleep .001)
+  (card-rset *card* +xp10-video-reset+ 1)
+  (card-rset *card* +xp10-dac-power-on+ 0))
+
 #+nil ;; turn DAC off
-(video-reset *card* 1)
+(lisp-video-reset)
 
 #+nil
 (lisp-set-mode)
 
 #+nil
 (lisp-unset-video-mode)
+
+#+nil
+(card-mget *card* +vid-fb-offset-t+)
+
 
 #+nil
 (card-mset *card* +vid-fb-offset-t+ #x00123456)
@@ -380,7 +414,68 @@ register."
        (let ((addr (+ +vid-fb-offset-t+
 		      (* 4 (+ (* pitch j)
 			      i)))))
-	 (card-mset *card* addr #xffffaaff))))))
+	 (card-mset *card* addr #xfaffaaff))))))
 #+nil
 (time
  (draw-screen))
+
+(defun instruction (&key (de 0) (vsync 0) (hsync 0)
+		    (cursor 0) (ret 0) (int 0) (opcode 0)
+		    (count 0 count-p) (iaddr 0 iaddr-p) 
+		    (memory-address 0 memory-address-p))
+  (declare (type (unsigned-byte 1) de vsync hsync ret int)
+	   (type (unsigned-byte 2) cursor)
+	   (type (unsigned-byte 3) opcode)
+	   (type (unsigned-byte 12) count)
+	   (type (unsigned-byte 9) iaddr)
+	   (type (unsigned-byte 21) memory-address)
+	   (values (unsigned-byte 32) &optional))
+  (when (and count-p memory-address-p)
+    (break "count and memory-address given at the same time."))
+  (when (and iaddr-p memory-address-p)
+    (break "iaddr and memory-address given at the same time."))
+  
+  (let ((v 0))
+    (when (<= 1 opcode 3) ;; invert count when call wait or send
+	(setf count (- 2049 count)))
+    (setf (ldb (byte 1 31) v) de
+	  (ldb (byte 1 30) v) vsync 
+	  (ldb (byte 1 29) v) hsync
+	  (ldb (byte 2 27) v) cursor 
+	  (ldb (byte 1 26) v) ret
+	  (ldb (byte 1 25) v) int
+	  (ldb (byte 3 21) v) opcode)
+    (when (or count-p iaddr-p)
+      (setf (ldb (byte 12 9) v) count
+	    (ldb (byte 9 0) v) iaddr))
+    (when memory-address-p
+      (setf (ldb (byte 21 0) v) memory-address))
+    v))
+
+(defmacro def-choice (name choices)
+  `(defun ,name (&optional (param ,(first (first choices))))
+     (declare (type (member ,@(mapcar #'first choices)) param))
+     (ecase param ,@choices)))
+
+(def-choice cursor ((:no-change #b0)
+		    (:advance-x #b01)
+		    (:reset-x-advance-y #b10)
+		    (:reset-xy #b11)))
+
+(def-choice opcode ((:jump 0)
+		    (:call 1)
+		    (:wait 2)
+		    (:send 3)
+		    (:fetch 5)
+		    (:addr 6)
+		    (:inc 7)))
+
+
+(let ((vfp 2)
+      (vsync 7)
+      (vbp 3))
+ (list
+  (instruction :opcode (opcode :call) :count vfp :iaddr 22 :hsync 1)
+  (instruction :opcode (opcode :call) :count vsync :iaddr 26 :hsync 1 :vsync 1)
+  (instruction :opcode (opcode :call) :count (1- vbp) :iaddr 22 :hsync 1 :vsync 1)
+  (instruction :opcode (opcode :addr))))
