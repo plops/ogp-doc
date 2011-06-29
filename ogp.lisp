@@ -362,7 +362,7 @@ register."
 	 (n   (progressive sap
 			   1280 1024
 			   1280 1024
-			   4 
+			   32 
 			   48 112 248
 			   1 3 38
 			   #x80 2
@@ -421,27 +421,28 @@ register."
 
 
 (defmacro def-choice (name choices)
+  "Define a function that maps a keyword into a number."
   `(defun ,name (&optional (param ,(first (first choices))))
      (declare (type (member ,@(mapcar #'first choices)) param))
      (ecase param ,@choices)))
 
 (def-choice cursor-to-nr ((:no-change #b0)
-		    (:advance-x #b01)
-		    (:reset-x-advance-y #b10)
-		    (:reset-xy #b11)))
+			  (:advance-x #b01)
+			  (:reset-x-advance-y #b10)
+			  (:reset-xy #b11)))
 
 (def-choice opcode-to-nr ((:jump 0)
-		    (:call 1)
-		    (:wait 2)
-		    (:send 3)
-		    (:fetch 5)
-		    (:addr 6)
-		    (:inc 7)))
+			  (:call 1)
+			  (:wait 2)
+			  (:send 3)
+			  (:fetch 5)
+			  (:addr 6)
+			  (:inc 7)))
 
 (defun vc (opcode &key (de 0) (vsync 0) (hsync 0)
-		    (cursor :no-change) (ret 0) (int 0) 
-		    (count 0 count-p) (iaddr 0 iaddr-p) 
-		    (memory-address 0 memory-address-p))
+	   (cursor :no-change) (ret 0) (int 0) 
+	   (count 0 count-p) (iaddr 0 iaddr-p) 
+	   (memory-address 0 memory-address-p))
   "Construct an instruction for the video controller."
   (declare (type (unsigned-byte 1) de vsync hsync ret int)
 	   (TYPE (MEMBER :NO-CHANGE :ADVANCE-X
@@ -456,7 +457,9 @@ register."
     (break "count and memory-address given at the same time."))
   (when (and iaddr-p memory-address-p)
     (break "iaddr and memory-address given at the same time."))
-  
+  (when (and (member opcode'(:addr :inc))
+	     (or count-p iaddr-p))
+    (break ":addr and :inc expect :memory-address instead of :count."))
   (let ((v 0)
 	(opcode-nr (opcode-to-nr opcode))
 	(cursor-nr (cursor-to-nr cursor)))
@@ -478,12 +481,45 @@ register."
       (setf (ldb (byte 21 0) v) memory-address))
     v))
 
+;; HSYNC-> HBP->    VIDEO->           HFP->
+;; --------................................      VFP
+;; --------................................      VFP
+;; ++++++++||||||||||||||||||||||||||||||||      VSYNC
+;; ++++++++||||||||||||||||||||||||||||||||      VSYNC
+;; --------................................      VBP
+;; --------................................      VBP
+;; --------........################........      VIDEO
+;; --------........################........      VIDEO
+;; --------........################........      VIDEO
+;; --------........################........      VIDEO
+;; --------........################........      VIDEO
+;; Legend:
+;;  - Horizontal sync asserted
+;;  | Vertical sync asserted
+;;  + Both Horizontal and Vertical sync asserted
+;;  . Blanking
+;;  # Active video
 
-(let ((vfp 2)
-      (vsync 7)
-      (vbp 3))
- (list
-  (vc :call :count vfp :iaddr 22 :hsync 1)
-  (vc :call :count vsync :iaddr 26 :hsync 1 :vsync 1)
-  (vc :call :count (1- vbp) :iaddr 22 :hsync 1 :vsync 1)
-  (vc :addr)))
+
+(progn 
+  (defun lisp-progressive (&key 
+			   (fb-width 1280) (fb-height 1024)
+			   (vp-width fb-width) (vp-height fb-height)
+			   (depth 32)
+			   (hres 1280) (hfp 48) (hsync 112) (hbp 248)
+			   (vres 1024) (vfp  1) (vsync   3) (vbp  38)
+			   (viewport 0) 
+			    (pixperclock 2))
+    (list
+     (vc :call :count vfp :iaddr 23 :hsync 1)
+     (vc :call :count vsync :iaddr 27 :hsync 1 :vsync 1)
+     (vc :call :count (1- vbp) :iaddr 23 :hsync 1 :vsync 1)
+     (vc :addr :memory-address (/ viewport 128) :hsync 1 :cursor :reset-xy)
+     (vc :wait :count (1- (/ hsync pixperclock)) :hsync 1)
+     (vc :fetch :count (/ (* vres depth) 256)) 
+     ;; there must be 3 instructions before next fetch, addr, inc
+     (vc :wait :count (- (/ vp-width pixperclock) 3))
+     (vc :inc )))
+  (let ((l (lisp-progressive)))
+    (loop for i below (length l) collect
+	 (list i (elt l i)))))
