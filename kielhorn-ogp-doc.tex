@@ -19,6 +19,7 @@
 \begin{document}
 \maketitle 
 
+\section{Somewhat long introduction}
 Right now I am supposed to write up my PhD but for some reason I
 decided to venture into the world of hardware design and low level
 programming.
@@ -27,7 +28,7 @@ During the last few days I spent some time trying to understand the
 open graphics board OGD1. I suspected it would be interesting but I
 wasn't aware that it would be so much fun.
 
-I do my PhD in physics. More precisely I work in the field of
+I do my PhD in physics. More precisely, I work in the field of
 optics. We improve a fluorescent microscope. Normally these
 microscopes shine blue light into a sample. The sample contains
 fluorophores that will emit green light upon exposure. This green
@@ -36,6 +37,118 @@ into the specimen as possible (this is what normal microscopes do) we
 try to control exactly from which directions and what parts of the
 sample are illuminated.
 
+You could say we use a data projector to shine light into the
+microscope. As opposed to a normal data projector we actually use two
+displays and as a light source we use a laser.
+
+But one of these displays is connected to a graphics card with a
+digital DVI output. For various reasons the displays can only run
+below 50\% duty cycle and need to be synchronized correctly.
+
+I have to say that it is quite an irritating experience, trying to
+synchronize either an NVIDIA or ATI graphics card (with the propietary
+drivers) to the vertical blank. I tried to use several OpenGL
+extensions (\verb!GLX_SGI_swap_control!, \verb!GLX_SGI_video_syn!)
+that should make this synchronization possible. But I didn't have any
+success. I used \verb!nm! and \verb!objdump -CDx! on libgl.so in order
+to figure out which of the functions are stubs and which actually
+contain some sensible code. However, I only managed to create some
+zombie processes.
+
+Earlier in the project I bought one OGD1 PCI card. When it arrived I
+was a bit confused because the card comes in PCI-X format. It looks a
+lot bigger than the usual PCI card. Incidentally our only Xeon
+computer that did have such a socket broke. So I thought, I could
+never use this card. However, a few days ago I learned that one can
+use it in any PCI socket.
+
+\section{Getting to work}
+There is a Wiki for the project at
+\verb!http://wiki.opengraphics.org/tiki-index.php!. This web page is a
+bit convoluted. I found it useful to filter out the more recent
+entries using Google's 'More Search Tools', especially 'Past Month'.
+
+Furthermore there are very helpful, fast responding people on the
+projects mailing list.
+
+The first thing you should do, is to look through their code:
+\verb!svn co svn://svn.opengraphics.org/ogp!.
+
+When I first received it, I was a bit overwhelmed but the directory
+structure gets comprehensible when you get accustomed to the projects
+nomenclature.
+
+\subsection{rtl/ Hardware description}
+Up to now I had little exposure to hardware description languages. The
+OGP1 board contains two FPGAs. The lattice XP10 to interface to the
+PCI bus and a Xilinx Spartan 3.
+
+I opened the the project in a the Xilinx software, which you can
+download free of charge. However I didn't succeed in building an
+image, but then I didn't try very hard. I have to say that I find the
+11 gigabytes Xilinx toolchain quite repulsive.
+
+Anyway, the file \verb!rtl/include/registers.txt! is very
+important. It contains the definitions of the registers that are
+needed to communicate with the hardware and is the file I spent the
+most time looking at.
+
+\subsection{drivers/ Standard interfaces}
+The first thing I did after installing the hardware, was to test it.
+I did this by compiling the kernel modules for the framebuffer driver.
+Unfortunately I didn't manage to compile the Xwindow driver because
+the autotools of Debian 5 don't seem to be recent enough.
+
+The good thing about these drivers are that they are in an early stage
+of development and quite easy to understand. The only task the kernel
+module \verb!ogp_skel! accomplishes is to register a handler for
+interrupts. Fortunately this is exactly what I'm interested in: I want
+to receive interrupts with the vertical refresh of the screen.
+
+\subsection{tools/oga1lib/ User level control}
+I learned most about the system by going through
+\verb!tools/oga1utils/bin/oga1-vid-test.c!. This program intializes a
+video mode and draws an animation pixel by pixel to the screen.
+
+The graphics card communicates via I2C with the computer screen in
+order to find out the ideal pixel clock rate and resolution (see
+parse-ddc). In my case it turned out that there were some errors in
+the way the clock dividers were set which resulted in a frame rate of
+\unit[47]{Hz} instead of \unit[60]{Hz}. In order to understand what
+was going on I first wrote an sb-alien foreign function interface to
+call \verb!liboga1.so! and then gradually replaced the higher level
+functions with my own lisp functions.
+
+During all this time the graphics card or my SBCL image never crashed.
+I think this is when I realized how much fun this is. You can stay in
+user level and experiment with all kinds of things. You can turn the
+DVI output on and off, you can connect different screens and ask for
+their EDID information -- and you never have to restart the
+computer. Actually right now I am logged into the lab computer from
+home via and work remotely via SLIME and Tramp.
+
+The last thing I worked on is the assembler for the instruction of the
+video controller. The video controller is implemented in the Xilinx
+FPGA and is in charge of sending the data from the graphics memory
+through the cable. It prepends the frame with a VSYNC pulse and each
+line with a HSYNC pulse (see the picture with \verb!HSYNC->! in the
+Lisp listing). This controller is also in charge of notifying the host
+CPU when a frame is finished by generating an interrupt that is then
+routed through the XP10 onto the PCI bus.
+
+\subsection{Interrupts}
+I'm currently trying to figure out, how I can enable the interrupt
+reporting and receive them on the CPU. Ideally one would use a small
+\verb!uio! kernel module that would allow to report the IRQs to user
+level.
+
+
+\section{Outlook}
+Other things that I want to look at are iverilog and
+gtkwave. Apparently one can simulate the hardware and look at the
+waveforms that the FPGA would generate.
+
+\section{Appendix Listing}
 
 
 \end{document}
